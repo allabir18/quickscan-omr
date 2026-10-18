@@ -1,0 +1,44 @@
+{
+  "name": "Scan",
+  "type": "object",
+  "properties": {
+    "file_uri": {
+      "type": "string",
+      "description": "Private storage URI of the uploaded OMR sheet image"
+    },
+    "question_count": {
+      "type": "number",
+      "description": "Number of questions on the sheet"
+    },
+    "options_count": {
+      "type": "number",
+      "description": "Number of options per question (2-6)"
+    },
+    "answers": {
+      "type": "array",
+      "description": "Detected answers from the OMR sheet",
+      "items": {
+        "type": "object",
+        "properties": {
+          "question": {
+            "type": "number",
+            "description": "Question number (1-based)"
+          },
+          "option": {
+            "type": "string",
+            "description": "Detected option letter (A-Z), or BLANK, MULTIPLE, UNCLEAR"
+          }
+        },
+        "required": [
+          "question",
+          "option"
+        ]
+      }
+    }
+  },
+  "required": [
+    "file_uri",
+    "question_count",
+    "options_count"
+  ]
+}
