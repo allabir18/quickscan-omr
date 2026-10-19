@@ -1,270 +1,238 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useServerFn } from "@tanstack/react-start";
-import React, { useEffect, useState } from "react";
-import { ScanLine, Loader2, Sparkles, RotateCcw } from "lucide-react";
-import { base44 } from "@/api/base44Client";
-import {
-  processOMRScan,
-  listScans,
-  getScan,
-  deleteScan,
-} from "@/lib/server-fns";
+import { useCallback, useRef, useState } from "react";
+import { Download, FileText, Loader2, Scissors, UploadCloud, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import UploadZone from "@/components/omr/UploadZone";
-import ResultsView from "@/components/omr/ResultsView";
-import ScanHistory from "@/components/omr/ScanHistory";
+import { Switch } from "@/components/ui/switch";
+import { imposePdfs } from "@/lib/pdf-impose";
 
 export const Route = createFileRoute("/")({
   ssr: false,
-  head: () => ({
-    meta: [
-      { title: "OMR Scanner — Detect MCQ Answers" },
-      {
-        name: "description",
-        content:
-          "Upload an OMR answer sheet and instantly detect the marked option for each question.",
-      },
-    ],
-  }),
-  component: ScannerPage,
+  head: () => ({ meta: [{ title: "PDF Imposer — N pages per page" }] }),
+  component: PdfImposer,
 });
 
-function ScannerPage() {
-  const [previewUrl, setPreviewUrl] = useState(null);
-  const [fileUri, setFileUri] = useState(null);
-  const [uploading, setUploading] = useState(false);
-  const [questionCount, setQuestionCount] = useState(25);
-  const [optionsCount, setOptionsCount] = useState(4);
-  const [scanning, setScanning] = useState(false);
-  const [results, setResults] = useState(null);
+function formatSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function PdfImposer() {
+  const [files, setFiles] = useState([]);
+  const [perPage, setPerPage] = useState(4);
+  const [autoTrim, setAutoTrim] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [dragging, setDragging] = useState(false);
   const [error, setError] = useState(null);
-  const [history, setHistory] = useState([]);
-  const [selectedId, setSelectedId] = useState(null);
+  const inputRef = useRef(null);
 
-  const process = useServerFn(processOMRScan);
-  const list = useServerFn(listScans);
-  const getOne = useServerFn(getScan);
-  const remove = useServerFn(deleteScan);
-
-  const refreshHistory = async () => {
-    try {
-      const res = await list();
-      setHistory(res.items || []);
-    } catch {
-      /* ignore */
-    }
-  };
-
-  useEffect(() => {
-    refreshHistory();
+  const addFiles = useCallback((incoming) => {
+    const pdfs = Array.from(incoming).filter(
+      (f) => f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf")
+    );
+    setError(null);
+    setFiles((prev) => [...prev, ...pdfs]);
   }, []);
 
-  const handleFile = async (f) => {
+  const onDrop = useCallback(
+    (e) => {
+      e.preventDefault();
+      setDragging(false);
+      addFiles(e.dataTransfer.files);
+    },
+    [addFiles]
+  );
+
+  const removeFile = (idx) => setFiles((prev) => prev.filter((_, i) => i !== idx));
+  const clearAll = () => setFiles([]);
+
+  const handleDownload = async () => {
+    if (!files.length || busy) return;
+    setBusy(true);
     setError(null);
-    setResults(null);
-    setSelectedId(null);
-    setPreviewUrl(URL.createObjectURL(f));
-    setUploading(true);
     try {
-      const { file_uri } = await base44.integrations.Core.UploadPrivateFile({ file: f });
-      setFileUri(file_uri);
-    } catch {
-      setError("Could not upload the image. Please try again.");
+      const { bytes } = await imposePdfs(files, perPage, autoTrim);
+      const blob = new Blob([bytes], { type: "application/pdf" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "combined-imposed.pdf";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err.message || "Something went wrong while processing the PDFs.");
     } finally {
-      setUploading(false);
+      setBusy(false);
     }
-  };
-
-  const handleScan = async () => {
-    if (!fileUri) return;
-    setScanning(true);
-    setError(null);
-    setResults(null);
-    try {
-      const res = await process({
-        data: {
-          file_uri: fileUri,
-          question_count: questionCount,
-          options_count: optionsCount,
-        },
-      });
-      setResults({
-        answers: res.answers,
-        questionCount,
-        optionsCount,
-        imageUrl: previewUrl,
-      });
-      setSelectedId(res.scan_id);
-      refreshHistory();
-    } catch {
-      setError("Scan failed. Please ensure the image is clear and try again.");
-    } finally {
-      setScanning(false);
-    }
-  };
-
-  const handleSelect = async (s) => {
-    setError(null);
-    try {
-      const full = await getOne({ data: { id: s.id } });
-      if (!full) return;
-      setResults({
-        answers: full.answers || [],
-        questionCount: full.question_count,
-        optionsCount: full.options_count,
-        imageUrl: full.image_url,
-      });
-      setSelectedId(s.id);
-      setPreviewUrl(null);
-      setFileUri(null);
-    } catch {
-      setError("Could not load that scan.");
-    }
-  };
-
-  const handleDelete = async (id) => {
-    try {
-      await remove({ data: { id } });
-      if (selectedId === id) {
-        setSelectedId(null);
-        setResults(null);
-      }
-      refreshHistory();
-    } catch {
-      /* ignore */
-    }
-  };
-
-  const reset = () => {
-    setPreviewUrl(null);
-    setFileUri(null);
-    setResults(null);
-    setError(null);
-    setSelectedId(null);
   };
 
   return (
-    <main className="mx-auto max-w-5xl px-4 py-10 sm:py-16">
-      <header className="mb-10 text-center">
-        <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1 text-xs font-medium text-muted-foreground">
-          <Sparkles className="h-3.5 w-3.5" /> AI-powered mark detection
-        </div>
-        <h1 className="text-4xl font-semibold tracking-tight sm:text-5xl">OMR Scanner</h1>
-        <p className="mx-auto mt-3 max-w-md text-balance text-muted-foreground">
-          Upload a filled MCQ answer sheet and instantly read the marked option for every
-          question.
-        </p>
-      </header>
-
-      <section className="rounded-3xl border border-border bg-card p-5 shadow-sm sm:p-7">
-        <UploadZone previewUrl={previewUrl} onFile={handleFile} disabled={scanning} />
-
-        <div className="mt-5 grid gap-4 sm:grid-cols-2">
-          <div>
-            <Label htmlFor="qcount" className="mb-1.5 block text-sm font-medium">
-              Questions
-            </Label>
-            <Input
-              id="qcount"
-              type="number"
-              min={1}
-              max={200}
-              value={questionCount}
-              onChange={(e) =>
-                setQuestionCount(
-                  Math.max(1, Math.min(200, Number(e.target.value) || 1))
-                )
-              }
-            />
+    <div className="min-h-screen bg-neutral-50 text-neutral-900">
+      <div className="mx-auto max-w-3xl px-6 py-16">
+        <header className="mb-10">
+          <div className="mb-3 inline-flex items-center gap-2 rounded-full bg-neutral-900 px-3 py-1 text-xs font-medium text-white">
+            <FileText className="h-3.5 w-3.5" />
+            PDF Imposer
           </div>
-          <div>
-            <Label className="mb-1.5 block text-sm font-medium">
-              Options per question
-            </Label>
-            <Select
-              value={String(optionsCount)}
-              onValueChange={(v) => setOptionsCount(Number(v))}
-            >
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {[2, 3, 4, 5, 6].map((n) => (
-                  <SelectItem key={n} value={String(n)}>
-                    {n} options (A–{String.fromCharCode(65 + n - 1)})
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+          <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">
+            N pages per page, double-sided
+          </h1>
+          <p className="mt-3 max-w-xl text-neutral-600">
+            Drop in any number of PDFs. Their pages are merged and packed — N pages per
+            page, front and back — into a single file ready for double-sided printing.
+            Choose how many pages go on each page below.
+          </p>
+        </header>
+
+        {/* Pages-per-page selector */}
+        <div className="mb-6">
+          <p className="mb-2 text-sm font-semibold text-neutral-900">Pages per page</p>
+          <div className="inline-flex rounded-full border border-neutral-300 bg-white p-1">
+            {[4, 8].map((n) => (
+              <button
+                key={n}
+                onClick={() => setPerPage(n)}
+                className={`rounded-full px-5 py-2.5 text-sm font-semibold transition-colors ${
+                  perPage === n ? "bg-neutral-900 text-white" : "text-neutral-600 hover:text-neutral-900"
+                }`}
+              >
+                {n} pages per page
+              </button>
+            ))}
           </div>
+          <p className="mt-2 text-xs text-neutral-500">
+            {perPage} pages on the front + {perPage} on the back = {perPage * 2} original pages per printed sheet.
+          </p>
         </div>
 
-        <div className="mt-5 flex flex-wrap items-center gap-3">
-          <Button
-            onClick={handleScan}
-            disabled={!fileUri || scanning || uploading}
-            size="lg"
-            className="gap-2"
-          >
-            {scanning ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <ScanLine className="h-4 w-4" />
-            )}
-            {scanning ? "Scanning…" : "Scan sheet"}
-          </Button>
-          {(previewUrl || results) && (
-            <Button onClick={reset} variant="ghost" className="gap-2">
-              <RotateCcw className="h-4 w-4" /> Start over
-            </Button>
-          )}
-          {uploading && (
-            <span className="text-sm text-muted-foreground">Uploading image…</span>
-          )}
+        {/* Auto-trim toggle */}
+        <div className="mb-6 flex items-center justify-between gap-4 rounded-2xl border border-neutral-200 bg-white px-5 py-4">
+          <div className="flex items-start gap-3">
+            <Scissors className="mt-0.5 h-5 w-5 shrink-0 text-neutral-500" />
+            <div>
+              <p className="text-sm font-semibold text-neutral-900">Auto-trim page margins</p>
+              <p className="mt-1 text-xs text-neutral-500">
+                Detects blank space around each page's content and crops it before packing,
+                so pages fill even more of the sheet.
+              </p>
+            </div>
+          </div>
+          <Switch checked={autoTrim} onCheckedChange={setAutoTrim} aria-label="Auto-trim page margins" />
         </div>
 
+        {/* Drop zone */}
+        <div
+          onDragOver={(e) => {
+            e.preventDefault();
+            setDragging(true);
+          }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={onDrop}
+          onClick={() => inputRef.current?.click()}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") inputRef.current?.click();
+          }}
+          className={`group flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed px-6 py-14 text-center transition-colors ${
+            dragging
+              ? "border-neutral-900 bg-neutral-100"
+              : "border-neutral-300 bg-white hover:border-neutral-400 hover:bg-neutral-50"
+          }`}
+        >
+          <input
+            ref={inputRef}
+            type="file"
+            accept="application/pdf,.pdf"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              addFiles(e.target.files);
+              e.target.value = "";
+            }}
+          />
+          <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-neutral-900 text-white transition-transform group-hover:scale-105">
+            <UploadCloud className="h-6 w-6" />
+          </div>
+          <p className="text-sm font-medium text-neutral-900">
+            Drop PDFs here, or click to browse
+          </p>
+          <p className="mt-1 text-xs text-neutral-500">Add as many as you like — all combined into one output.</p>
+        </div>
+
+        {/* File list */}
+        {files.length > 0 && (
+          <div className="mt-6">
+            <div className="mb-3 flex items-center justify-between">
+              <p className="text-sm font-medium text-neutral-700">
+                {files.length} file{files.length === 1 ? "" : "s"}
+              </p>
+              <button
+                onClick={clearAll}
+                className="text-xs font-medium text-neutral-500 hover:text-neutral-900"
+              >
+                Clear all
+              </button>
+            </div>
+            <ul className="space-y-2">
+              {files.map((f, i) => (
+                <li
+                  key={`${f.name}-${i}`}
+                  className="flex items-center justify-between rounded-xl border border-neutral-200 bg-white px-4 py-3"
+                >
+                  <div className="flex min-w-0 items-center gap-3">
+                    <FileText className="h-4 w-4 shrink-0 text-neutral-400" />
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium text-neutral-900">{f.name}</p>
+                      <p className="text-xs text-neutral-500">{formatSize(f.size)}</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => removeFile(i)}
+                    className="rounded-md p-1.5 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-900"
+                    aria-label={`Remove ${f.name}`}
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {/* Error */}
         {error && (
-          <p className="mt-4 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          <p className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
             {error}
           </p>
         )}
-      </section>
 
-      {scanning && !results && (
-        <div className="mt-10 flex flex-col items-center gap-3 text-center">
-          <Loader2 className="h-7 w-7 animate-spin text-muted-foreground" />
-          <p className="text-sm text-muted-foreground">
-            Reading the marks on your sheet…
+        {/* Action */}
+        <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-xs text-neutral-500">
+            Tip: print the result double-sided with <span className="font-medium text-neutral-700">flip on long edge</span>.
           </p>
+          <Button
+            onClick={handleDownload}
+            disabled={!files.length || busy}
+            className="inline-flex items-center gap-2 rounded-full bg-neutral-900 px-6 py-3 text-sm font-medium text-white hover:bg-neutral-800 disabled:opacity-50"
+          >
+            {busy ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Processing…
+              </>
+            ) : (
+              <>
+                <Download className="h-4 w-4" />
+                Download Combined PDF
+              </>
+            )}
+          </Button>
         </div>
-      )}
-
-      {results && (
-        <section className="mt-10">
-          <ResultsView
-            answers={results.answers}
-            questionCount={results.questionCount}
-            optionsCount={results.optionsCount}
-            imageUrl={results.imageUrl}
-          />
-        </section>
-      )}
-
-      <ScanHistory
-        scans={history}
-        onSelect={handleSelect}
-        onDelete={handleDelete}
-        selectedId={selectedId}
-      />
-    </main>
+      </div>
+    </div>
   );
 }
